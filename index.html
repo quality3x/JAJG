@@ -1,0 +1,383 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>シンプル・タワーディフェンス</title>
+  <style>
+    :root { color-scheme: dark; }
+    body {
+      margin: 0;
+      font-family: "Hiragino Kaku Gothic ProN", "Yu Gothic", sans-serif;
+      background: #131722;
+      color: #f3f5f7;
+      display: grid;
+      place-items: center;
+      min-height: 100vh;
+    }
+    .wrap { width: min(960px, 95vw); }
+    h1 { margin: 0 0 8px; font-size: 1.5rem; }
+    .hud {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-bottom: 10px;
+      align-items: center;
+      justify-content: space-between;
+      background: #1f2433;
+      padding: 10px 14px;
+      border-radius: 10px;
+      border: 1px solid #31384d;
+    }
+    .stats { display: flex; gap: 14px; font-weight: 700; }
+    .actions { display: flex; gap: 8px; }
+    button {
+      background: #4e7cff;
+      border: 0;
+      color: white;
+      padding: 8px 12px;
+      border-radius: 8px;
+      cursor: pointer;
+      font-weight: 700;
+    }
+    button.secondary { background: #3a425b; }
+    canvas {
+      width: 100%;
+      height: auto;
+      border-radius: 10px;
+      border: 1px solid #31384d;
+      background: #16202e;
+      display: block;
+    }
+    .note { margin-top: 8px; color: #aeb9cc; font-size: 0.95rem; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>タワーディフェンスゲーム</h1>
+    <div class="hud">
+      <div class="stats">
+        <span>❤️ ライフ: <span id="life">20</span></span>
+        <span>💰 ゴールド: <span id="gold">120</span></span>
+        <span>🌊 ウェーブ: <span id="wave">1</span></span>
+        <span>⭐ スコア: <span id="score">0</span></span>
+      </div>
+      <div class="actions">
+        <button id="towerBtn">タワー設置 (50)</button>
+        <button id="startBtn" class="secondary">ウェーブ開始</button>
+      </div>
+    </div>
+    <canvas id="game" width="920" height="520"></canvas>
+    <p class="note">操作: 「タワー設置」を押してから緑マスをクリックして設置。敵がゴールするとライフ減少。ライフ0でゲームオーバー。</p>
+  </div>
+
+  <script>
+    const canvas = document.getElementById("game");
+    const ctx = canvas.getContext("2d");
+
+    const lifeEl = document.getElementById("life");
+    const goldEl = document.getElementById("gold");
+    const waveEl = document.getElementById("wave");
+    const scoreEl = document.getElementById("score");
+
+    const state = {
+      life: 20,
+      gold: 120,
+      wave: 1,
+      score: 0,
+      placingTower: false,
+      gameOver: false,
+      waveActive: false,
+      spawnTimer: 0,
+      spawnCount: 0,
+      toSpawn: 0,
+      enemies: [],
+      towers: [],
+      bullets: []
+    };
+
+    const path = [
+      {x: 0, y: 260},
+      {x: 220, y: 260},
+      {x: 220, y: 120},
+      {x: 460, y: 120},
+      {x: 460, y: 390},
+      {x: 700, y: 390},
+      {x: 700, y: 210},
+      {x: 920, y: 210}
+    ];
+
+    const buildSpots = [
+      {x: 130, y: 170}, {x: 130, y: 350},
+      {x: 315, y: 200}, {x: 365, y: 305},
+      {x: 560, y: 200}, {x: 570, y: 450},
+      {x: 790, y: 300}, {x: 810, y: 115}
+    ];
+
+    class Enemy {
+      constructor(hp, speed, reward) {
+        this.hp = hp;
+        this.maxHp = hp;
+        this.speed = speed;
+        this.reward = reward;
+        this.segment = 0;
+        this.x = path[0].x;
+        this.y = path[0].y;
+        this.radius = 12;
+      }
+      update(dt) {
+        if (this.segment >= path.length - 1) return "goal";
+        const a = path[this.segment], b = path[this.segment + 1];
+        const dx = b.x - a.x, dy = b.y - a.y;
+        const len = Math.hypot(dx, dy);
+        const vx = (dx / len) * this.speed * dt;
+        const vy = (dy / len) * this.speed * dt;
+
+        const nx = this.x + vx, ny = this.y + vy;
+        const reachedX = (dx >= 0 ? nx >= b.x : nx <= b.x);
+        const reachedY = (dy >= 0 ? ny >= b.y : ny <= b.y);
+
+        if ((dx === 0 || reachedX) && (dy === 0 || reachedY)) {
+          this.x = b.x;
+          this.y = b.y;
+          this.segment++;
+          if (this.segment >= path.length - 1) return "goal";
+        } else {
+          this.x = nx;
+          this.y = ny;
+        }
+        return "alive";
+      }
+      draw() {
+        ctx.fillStyle = "#ff5d73";
+        ctx.beginPath();
+        ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+        ctx.fill();
+
+        const w = 26;
+        ctx.fillStyle = "#2e3447";
+        ctx.fillRect(this.x - w/2, this.y - 20, w, 4);
+        ctx.fillStyle = "#8dfd89";
+        ctx.fillRect(this.x - w/2, this.y - 20, w * (this.hp / this.maxHp), 4);
+      }
+    }
+
+    class Tower {
+      constructor(x, y) {
+        this.x = x;
+        this.y = y;
+        this.range = 145;
+        this.reload = 0;
+        this.fireRate = 0.55;
+      }
+      update(dt, enemies) {
+        this.reload -= dt;
+        if (this.reload > 0) return;
+        let target = null;
+        let farthest = -1;
+        for (const e of enemies) {
+          const d = Math.hypot(this.x - e.x, this.y - e.y);
+          if (d <= this.range && e.segment > farthest) {
+            farthest = e.segment;
+            target = e;
+          }
+        }
+        if (target) {
+          state.bullets.push(new Bullet(this.x, this.y, target));
+          this.reload = this.fireRate;
+        }
+      }
+      draw() {
+        ctx.fillStyle = "#69a6ff";
+        ctx.beginPath();
+        ctx.arc(this.x, this.y, 16, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = "#9ec3ff33";
+        ctx.beginPath();
+        ctx.arc(this.x, this.y, this.range, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+    }
+
+    class Bullet {
+      constructor(x, y, target) {
+        this.x = x;
+        this.y = y;
+        this.target = target;
+        this.speed = 380;
+        this.damage = 16;
+        this.dead = false;
+      }
+      update(dt) {
+        if (!this.target || this.target.hp <= 0) {
+          this.dead = true;
+          return;
+        }
+        const dx = this.target.x - this.x;
+        const dy = this.target.y - this.y;
+        const d = Math.hypot(dx, dy);
+        const step = this.speed * dt;
+        if (d <= step + this.target.radius) {
+          this.target.hp -= this.damage;
+          this.dead = true;
+          if (this.target.hp <= 0) {
+            state.gold += this.target.reward;
+            state.score += 10;
+          }
+          return;
+        }
+        this.x += (dx / d) * step;
+        this.y += (dy / d) * step;
+      }
+      draw() {
+        ctx.fillStyle = "#ffe07a";
+        ctx.beginPath();
+        ctx.arc(this.x, this.y, 4, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    function startWave() {
+      if (state.gameOver || state.waveActive) return;
+      state.waveActive = true;
+      state.spawnCount = 0;
+      state.spawnTimer = 0;
+      state.toSpawn = 6 + state.wave * 2;
+    }
+
+    function spawnEnemy() {
+      const hp = 34 + state.wave * 10;
+      const speed = 55 + state.wave * 6;
+      const reward = 8 + state.wave;
+      state.enemies.push(new Enemy(hp, speed, reward));
+      state.spawnCount++;
+    }
+
+    function update(dt) {
+      if (state.gameOver) return;
+
+      if (state.waveActive) {
+        state.spawnTimer -= dt;
+        if (state.spawnCount < state.toSpawn && state.spawnTimer <= 0) {
+          spawnEnemy();
+          state.spawnTimer = Math.max(0.2, 0.8 - state.wave * 0.03);
+        }
+        if (state.spawnCount >= state.toSpawn && state.enemies.length === 0) {
+          state.waveActive = false;
+          state.wave++;
+          state.gold += 20;
+        }
+      }
+
+      for (const t of state.towers) t.update(dt, state.enemies);
+
+      for (const b of state.bullets) b.update(dt);
+      state.bullets = state.bullets.filter(b => !b.dead);
+
+      const remain = [];
+      for (const e of state.enemies) {
+        if (e.hp <= 0) continue;
+        const result = e.update(dt);
+        if (result === "goal") {
+          state.life--;
+          if (state.life <= 0) {
+            state.gameOver = true;
+          }
+        } else {
+          remain.push(e);
+        }
+      }
+      state.enemies = remain;
+
+      lifeEl.textContent = state.life;
+      goldEl.textContent = state.gold;
+      waveEl.textContent = state.wave;
+      scoreEl.textContent = state.score;
+    }
+
+    function drawPath() {
+      ctx.strokeStyle = "#f2b880";
+      ctx.lineWidth = 26;
+      ctx.lineCap = "round";
+      ctx.beginPath();
+      ctx.moveTo(path[0].x, path[0].y);
+      for (let i = 1; i < path.length; i++) {
+        ctx.lineTo(path[i].x, path[i].y);
+      }
+      ctx.stroke();
+    }
+
+    function drawBuildSpots() {
+      for (const s of buildSpots) {
+        const taken = state.towers.some(t => Math.hypot(t.x - s.x, t.y - s.y) < 4);
+        ctx.fillStyle = taken ? "#2f374e" : "#2f6f4d";
+        ctx.fillRect(s.x - 18, s.y - 18, 36, 36);
+      }
+    }
+
+    function draw() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      drawPath();
+      drawBuildSpots();
+      for (const t of state.towers) t.draw();
+      for (const e of state.enemies) e.draw();
+      for (const b of state.bullets) b.draw();
+
+      if (state.gameOver) {
+        ctx.fillStyle = "#000000b0";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.fillStyle = "#fff";
+        ctx.font = "bold 52px sans-serif";
+        ctx.fillText("ゲームオーバー", 300, 230);
+        ctx.font = "26px sans-serif";
+        ctx.fillText(`スコア: ${state.score}`, 395, 280);
+      }
+
+      if (state.placingTower) {
+        ctx.fillStyle = "#ffffffdd";
+        ctx.font = "16px sans-serif";
+        ctx.fillText("設置場所をクリック", 20, 28);
+      }
+    }
+
+    let last = performance.now();
+    function loop(now) {
+      const dt = Math.min(0.033, (now - last) / 1000);
+      last = now;
+      update(dt);
+      draw();
+      requestAnimationFrame(loop);
+    }
+    requestAnimationFrame(loop);
+
+    document.getElementById("startBtn").addEventListener("click", startWave);
+
+    document.getElementById("towerBtn").addEventListener("click", () => {
+      state.placingTower = true;
+    });
+
+    canvas.addEventListener("click", (ev) => {
+      if (!state.placingTower || state.gameOver) return;
+      const rect = canvas.getBoundingClientRect();
+      const x = ((ev.clientX - rect.left) / rect.width) * canvas.width;
+      const y = ((ev.clientY - rect.top) / rect.height) * canvas.height;
+
+      const cost = 50;
+      if (state.gold < cost) {
+        state.placingTower = false;
+        return;
+      }
+
+      const spot = buildSpots.find(s => Math.hypot(s.x - x, s.y - y) < 20);
+      if (!spot) return;
+      const occupied = state.towers.some(t => Math.hypot(t.x - spot.x, t.y - spot.y) < 4);
+      if (occupied) return;
+
+      state.towers.push(new Tower(spot.x, spot.y));
+      state.gold -= cost;
+      state.placingTower = false;
+    });
+  </script>
+</body>
+</html>
